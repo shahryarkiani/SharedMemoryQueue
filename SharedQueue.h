@@ -7,15 +7,15 @@
 #include <fcntl.h>
 #include <iostream>
 #include <array>
-#include <mutex>
+#include <pthread.h>
 
 #include "Debug.h"
 
 static const size_t QUEUE_SIZE = 4096;
 
 struct SharedMemoryBlock {
-    std::mutex mutex;
-    std::array<char, QUEUE_SIZE - sizeof(std::mutex)> buffer;
+    pthread_mutex_t mutex;
+    std::array<char, QUEUE_SIZE - sizeof(pthread_mutex_t)> buffer;
 };
 
 static_assert(sizeof(SharedMemoryBlock) == QUEUE_SIZE,
@@ -33,14 +33,24 @@ protected:
 
         bool sharedFileExists = access(queueName.c_str(), F_OK) == 0;
         if(sharedFileExists) LogInfo("File already exists");
-        
-        int fd = open(queueName.c_str(), O_CREAT | O_RDWR);
+        // TODO: race condition on opening here
+        int fd = open(queueName.c_str(), O_CREAT | O_RDWR, 0666);
+        if(fd == -1) {
+            LogError("Failed open");
+        }
         if(!sharedFileExists) ftruncate(fd, QUEUE_SIZE);
         
         data = static_cast<SharedMemoryBlock*>(mmap(NULL, QUEUE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0));
-
+        if (data == MAP_FAILED) {
+            LogError("Failed MMAP");
+        }
         if(!sharedFileExists) { // need to initialize mutex
-            new (&data->mutex) std::mutex{};
+            pthread_mutexattr_t attr;
+            pthread_mutexattr_init(&attr);
+            pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
+            
+            pthread_mutex_init(&data->mutex, &attr);
+            pthread_mutexattr_destroy(&attr);
             LogInfo("Shared Mutex Initialized");
         }
 
@@ -49,9 +59,8 @@ protected:
 
     ~SharedQueue() {
         LogInfo("Cleaning up shared memory");
-
-        unlink(queueName.c_str());
         munmap(data, QUEUE_SIZE);
+        unlink(queueName.c_str());
     }
 };
 
@@ -61,10 +70,10 @@ class SharedQueueWriter : SharedQueue {
     SharedQueueWriter(std::string name) : SharedQueue(name) {}
 
     void writeVal() {
-        data->mutex.lock();
+        pthread_mutex_lock(&data->mutex);
         LogInfo("w locked");
-        sleep(15);
-        data->mutex.unlock();
+        sleep(8);
+        pthread_mutex_unlock(&data->mutex);
         LogInfo("w unlocked");
     }
 };
@@ -76,9 +85,9 @@ class SharedQueueReader : SharedQueue {
 
     void readVal() {
         LogInfo("waiting for lock");
-        data->mutex.lock();
+        pthread_mutex_lock(&data->mutex);
         LogInfo("r locked");
-        data->mutex.unlock();
+        pthread_mutex_unlock(&data->mutex);
         LogInfo("r unlocked");
     }
 };
