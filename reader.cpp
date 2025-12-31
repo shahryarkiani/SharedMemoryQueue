@@ -2,6 +2,11 @@
 #include <string>
 
 int main() {
-    SharedQueueReader queue("abc");
-    queue.readVal();
+    SharedQueueReader<int> queue("abc");
+    
+    int received = queue.pop();
+
+    while(received != 10000000) {
+        received = queue.pop();
+    }
 }

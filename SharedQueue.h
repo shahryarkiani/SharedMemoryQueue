@@ -11,21 +11,110 @@
 
 #include "Debug.h"
 
-static const size_t QUEUE_SIZE = 4096;
+static const size_t QUEUE_SIZE = 4096 * 8;
 
+template<typename T>
 struct SharedMemoryBlock {
-    pthread_mutex_t mutex;
-    std::array<char, QUEUE_SIZE - sizeof(pthread_mutex_t)> buffer;
+    struct {
+        pthread_mutex_t mutex;
+        pthread_cond_t condVar;
+        alignas(64) int readIdx;
+        alignas(64) int insertIdx;     
+    } control;
+
+    static const int capacity = (QUEUE_SIZE - sizeof(control)) / sizeof(T);
+
+    std::array<T, capacity> buffer;
+
+
+    void init() {
+        pthread_mutexattr_t mutexAttr;
+        pthread_mutexattr_init(&mutexAttr);
+        pthread_mutexattr_setpshared(&mutexAttr, PTHREAD_PROCESS_SHARED);
+        
+        pthread_mutex_init(&control.mutex, &mutexAttr);
+        pthread_mutexattr_destroy(&mutexAttr);
+
+        pthread_condattr_t condAttr;
+        pthread_condattr_init(&condAttr);
+        pthread_condattr_setpshared(&condAttr, PTHREAD_PROCESS_SHARED);
+
+        pthread_cond_init(&control.condVar, &condAttr);
+        pthread_condattr_destroy(&condAttr);
+
+        LogInfo("Shared Mutex and Condition Variable Initialized");
+        
+        control.readIdx = -1;
+        control.insertIdx = 0;
+
+        for(auto& data : buffer) {
+            data = 0;
+        }
+    }
+
+    bool isFull() {
+        return control.readIdx == control.insertIdx;
+    }
+
+    bool isEmpty() {
+        return control.readIdx == -1;
+    }
+
+    void push(T val) {
+        pthread_mutex_lock(&control.mutex);
+        
+        while(isFull()) { // need to wait until a read happens
+            pthread_cond_wait(&control.condVar, &control.mutex);
+        }
+
+        bool wasEmpty = isEmpty();
+
+        buffer[control.insertIdx] = val;
+        if(control.readIdx == -1) control.readIdx = 0;
+
+        control.insertIdx = (control.insertIdx + 1) % capacity;
+
+        pthread_mutex_unlock(&control.mutex);
+        if(wasEmpty) pthread_cond_signal(&control.condVar);
+    }
+
+    T pop() {
+        pthread_mutex_lock(&control.mutex);
+
+        while(isEmpty()) { // need to wait until a write happens
+            pthread_cond_wait(&control.condVar, &control.mutex);
+        }
+
+        bool wasFull = isFull();
+
+        T returnVal = buffer[control.readIdx];
+        
+        control.readIdx = (control.readIdx + 1) % capacity;
+
+        if(isFull()) { // shouldn't be full after a read, so that means the queue is actually empty
+            control.readIdx = -1;
+            control.insertIdx = 0;
+        }
+
+        pthread_mutex_unlock(&control.mutex);
+        
+        if(wasFull) pthread_cond_signal(&control.condVar);
+
+        return returnVal;
+    }
 };
 
-static_assert(sizeof(SharedMemoryBlock) == QUEUE_SIZE,
-              "SharedMemoryBlock must be exactly QUEUE_SIZE bytes");
 
+static_assert(sizeof(SharedMemoryBlock<char>) == QUEUE_SIZE,
+            "SharedMemoryBlock must be exactly QUEUE_SIZE bytes");
+
+
+template<typename T>
 class SharedQueue {
 protected:
     
     std::string queueName;
-    SharedMemoryBlock* data; // ptr to shared memory
+    SharedMemoryBlock<T>* data; // ptr to shared memory
 
     SharedQueue(std::string name) : queueName("/dev/shm/" + name), data(nullptr) {
         LogInfo("Setting up shared memory");
@@ -38,20 +127,15 @@ protected:
         if(fd == -1) {
             LogError("Failed open");
         }
-        if(!sharedFileExists) ftruncate(fd, QUEUE_SIZE);
+        ftruncate(fd, QUEUE_SIZE); // safe to call from multiple processes
         
-        data = static_cast<SharedMemoryBlock*>(mmap(NULL, QUEUE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0));
+        data = static_cast<SharedMemoryBlock<T>*>(mmap(NULL, QUEUE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0));
         if (data == MAP_FAILED) {
             LogError("Failed MMAP");
         }
-        if(!sharedFileExists) { // need to initialize mutex
-            pthread_mutexattr_t attr;
-            pthread_mutexattr_init(&attr);
-            pthread_mutexattr_setpshared(&attr, PTHREAD_PROCESS_SHARED);
-            
-            pthread_mutex_init(&data->mutex, &attr);
-            pthread_mutexattr_destroy(&attr);
-            LogInfo("Shared Mutex Initialized");
+        if(!sharedFileExists) { 
+            // race condition here too, non initializing process might try locking before its initialized
+            data->init();
         }
 
         close(fd);
@@ -60,35 +144,29 @@ protected:
     ~SharedQueue() {
         LogInfo("Cleaning up shared memory");
         munmap(data, QUEUE_SIZE);
-        unlink(queueName.c_str());
+        // unlink(queueName.c_str());
     }
 };
 
-class SharedQueueWriter : SharedQueue {
+template<typename T>
+class SharedQueueWriter : SharedQueue<T> {
     
     public:
-    SharedQueueWriter(std::string name) : SharedQueue(name) {}
+    SharedQueueWriter(std::string name) : SharedQueue<T>(name) {}
 
-    void writeVal() {
-        pthread_mutex_lock(&data->mutex);
-        LogInfo("w locked");
-        sleep(8);
-        pthread_mutex_unlock(&data->mutex);
-        LogInfo("w unlocked");
+    void push(T val) {
+        this->data->push(val);
     }
 };
 
-class SharedQueueReader : SharedQueue {
+template<typename T>
+class SharedQueueReader : SharedQueue<T> {
 
     public:
-    SharedQueueReader(std::string name) : SharedQueue(name) {}
+    SharedQueueReader(std::string name) : SharedQueue<T>(name) {}
 
-    void readVal() {
-        LogInfo("waiting for lock");
-        pthread_mutex_lock(&data->mutex);
-        LogInfo("r locked");
-        pthread_mutex_unlock(&data->mutex);
-        LogInfo("r unlocked");
+    T pop() {
+        return this->data->pop();
     }
 };
 
