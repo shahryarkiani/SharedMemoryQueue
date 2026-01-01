@@ -43,9 +43,10 @@ struct SpinQueue {
     }
 
     T pop() {
+        // caching the count on the reader thread doesn't improve throughput in the current benchmark
         // while (control.localReadCount == 0) {
-        //     control.localReadCount = control.count.load(std::memory_order_relaxed);
-        // }
+        //     control.localReadCount = control.count.load(std::memory_order_acquire);
+        // } 
         while (control.count.load(std::memory_order_acquire) == 0) {}
         T retVal = std::move(buffer[control.readIdx]);
         control.readIdx = (control.readIdx + 1) % capacity;
