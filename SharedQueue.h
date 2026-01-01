@@ -8,13 +8,60 @@
 #include <iostream>
 #include <array>
 #include <pthread.h>
-
+#include <atomic>
 #include "Debug.h"
 
 static const size_t QUEUE_SIZE = 4096 * 8;
 
 template<typename T>
-struct SharedMemoryBlock {
+struct SpinQueue {
+    struct {
+        alignas(64) int64_t readIdx;
+        alignas(64) int64_t localReadCount;
+        alignas(64) std::atomic_int64_t count;
+        alignas(64) int64_t writeIdx;
+    } control;
+
+    static const int capacity = (QUEUE_SIZE - sizeof(control)) / sizeof(T);
+
+    std::array<T, capacity> buffer;
+
+    void init() {
+        control.readIdx = 0;
+        control.localReadCount = 0;
+        control.writeIdx = 0;
+        control.count.store(0);
+        for(auto& data : buffer) data = 0;
+    }
+
+    void push(T val) {
+        while(control.count.load(std::memory_order_acquire) == capacity) {}
+
+        buffer[control.writeIdx] = std::move(val);
+        control.writeIdx = (control.writeIdx + 1) % capacity;
+        control.count.fetch_add(1, std::memory_order_release);
+    }
+
+    T pop() {
+        // while (control.localReadCount == 0) {
+        //     control.localReadCount = control.count.load(std::memory_order_relaxed);
+        // }
+        while (control.count.load(std::memory_order_acquire) == 0) {}
+        T retVal = std::move(buffer[control.readIdx]);
+        control.readIdx = (control.readIdx + 1) % capacity;
+        // control.localReadCount--;
+        control.count.fetch_sub(1, std::memory_order_release);
+
+        return retVal;
+    }
+};
+
+static_assert(sizeof(SpinQueue<char>) == QUEUE_SIZE,
+            "SpinQueue must be exactly QUEUE_SIZE bytes");
+
+
+template<typename T>
+struct BlockingQueue {
     struct {
         pthread_mutex_t mutex;
         pthread_cond_t condVar;
@@ -69,7 +116,7 @@ struct SharedMemoryBlock {
 
         bool wasEmpty = isEmpty();
 
-        buffer[control.insertIdx] = val;
+        buffer[control.insertIdx] = std::move(val);
         if(control.readIdx == -1) control.readIdx = 0;
 
         control.insertIdx = (control.insertIdx + 1) % capacity;
@@ -87,7 +134,7 @@ struct SharedMemoryBlock {
 
         bool wasFull = isFull();
 
-        T returnVal = buffer[control.readIdx];
+        T returnVal = std::move(buffer[control.readIdx]);
         
         control.readIdx = (control.readIdx + 1) % capacity;
 
@@ -105,16 +152,16 @@ struct SharedMemoryBlock {
 };
 
 
-static_assert(sizeof(SharedMemoryBlock<char>) == QUEUE_SIZE,
-            "SharedMemoryBlock must be exactly QUEUE_SIZE bytes");
+static_assert(sizeof(BlockingQueue<char>) == QUEUE_SIZE,
+            "BlockingQueue must be exactly QUEUE_SIZE bytes");
 
 
-template<typename T>
+template<typename T, template<typename> class BackingQueue>
 class SharedQueue {
 protected:
     
     std::string queueName;
-    SharedMemoryBlock<T>* data; // ptr to shared memory
+    BackingQueue<T>* data; // ptr to shared memory
 
     SharedQueue(std::string name) : queueName("/dev/shm/" + name), data(nullptr) {
         LogInfo("Setting up shared memory");
@@ -129,7 +176,7 @@ protected:
         }
         ftruncate(fd, QUEUE_SIZE); // safe to call from multiple processes
         
-        data = static_cast<SharedMemoryBlock<T>*>(mmap(NULL, QUEUE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0));
+        data = static_cast<BackingQueue<T>*>(mmap(NULL, QUEUE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0));
         if (data == MAP_FAILED) {
             LogError("Failed MMAP");
         }
@@ -149,10 +196,10 @@ protected:
 };
 
 template<typename T>
-class SharedQueueWriter : SharedQueue<T> {
+class BlockingQueueWriter : SharedQueue<T, BlockingQueue> {
     
     public:
-    SharedQueueWriter(std::string name) : SharedQueue<T>(name) {}
+    BlockingQueueWriter(std::string name) : SharedQueue<T, BlockingQueue>(name) {}
 
     void push(T val) {
         this->data->push(val);
@@ -160,10 +207,32 @@ class SharedQueueWriter : SharedQueue<T> {
 };
 
 template<typename T>
-class SharedQueueReader : SharedQueue<T> {
+class BlockingQueueReader : SharedQueue<T, BlockingQueue> {
 
     public:
-    SharedQueueReader(std::string name) : SharedQueue<T>(name) {}
+    BlockingQueueReader(std::string name) : SharedQueue<T, BlockingQueue>(name) {}
+
+    T pop() {
+        return this->data->pop();
+    }
+};
+
+template<typename T>
+class SpinQueueWriter : SharedQueue<T, SpinQueue> {
+    
+    public:
+    SpinQueueWriter(std::string name) : SharedQueue<T, SpinQueue>(name) {}
+
+    void push(T val) {
+        this->data->push(val);
+    }
+};
+
+template<typename T>
+class SpinQueueReader : SharedQueue<T, SpinQueue> {
+
+    public:
+    SpinQueueReader(std::string name) : SharedQueue<T, SpinQueue>(name) {}
 
     T pop() {
         return this->data->pop();

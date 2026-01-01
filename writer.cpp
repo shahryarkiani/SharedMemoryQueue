@@ -2,10 +2,9 @@
 #include <string>
 
 int main() {
-    SharedQueueWriter<int> queue("abc");
+    SpinQueueWriter<int> queue("abc");
     
-    
-    for(int i = 0; i < 10000001; i++) {
+    for(int i = 0; i < 100000001; i++) {
         queue.push(i);
     }
 }
