@@ -56,6 +56,50 @@ struct SpinQueue {
     }
 };
 
+// Alternate Implementation, very similar/slighty slower performance
+// template<typename T>
+// struct SpinQueue {
+//     struct {
+//         alignas(64) std::atomic_uint64_t readIdx;
+//         alignas(64) std::atomic_uint64_t writeIdx;
+//         alignas(64) uint64_t localReadIdx;
+//         alignas(64) uint64_t localWriteIdx;
+//     } control;
+
+//     static const int capacity = (QUEUE_SIZE - sizeof(control)) / sizeof(T);
+
+//     std::array<T, capacity> buffer;
+
+//     void init() {
+//         control.readIdx.store(0);
+//         control.writeIdx.store(0);
+//         control.localReadIdx = 0;
+//         control.localWriteIdx = 0;
+//         for(auto& data : buffer) data = 0;
+//     }
+
+//     void push(T val) {
+//         uint64_t localWrite = control.writeIdx.load(std::memory_order_acquire);
+//         while((localWrite - control.localReadIdx) == capacity) {
+//             control.localReadIdx = control.readIdx.load(std::memory_order_acquire);
+//         }
+
+//         buffer[localWrite % capacity] = std::move(val);
+//         control.writeIdx.fetch_add(1, std::memory_order_release);
+//     }
+
+//     T pop() {
+//         uint64_t localRead = control.readIdx.load(std::memory_order_acquire);
+//         while (localRead == control.localWriteIdx) {
+//             control.localWriteIdx = control.writeIdx.load(std::memory_order_acquire);
+//         }
+//         T retVal = std::move(buffer[localRead % capacity]);
+//         control.readIdx.fetch_add(1, std::memory_order_release);
+
+//         return retVal;
+//     }
+// };
+
 static_assert(sizeof(SpinQueue<char>) == QUEUE_SIZE,
             "SpinQueue must be exactly QUEUE_SIZE bytes");
 
