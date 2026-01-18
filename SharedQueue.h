@@ -58,7 +58,7 @@ static const size_t QUEUE_SIZE = 4096 * 8;
 //     }
 // };
 
-// Alternate Implementation, very similar/slighty slower performance
+// Alternate Implementation, very variable performance
 template<typename T>
 struct SpinQueue {
     struct {
