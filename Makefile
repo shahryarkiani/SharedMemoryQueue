@@ -1,9 +1,9 @@
 all: writer reader
 
 writer: writer.cpp SharedQueue.h
-	g++ -Wall writer.cpp -o writer
+	g++ -Wall -Wextra -O3 writer.cpp -o writer
 
 reader: reader.cpp SharedQueue.h
-	g++ -Wall reader.cpp -o reader
+	g++ -Wall -Wextra -O3 reader.cpp -o reader
 
 .PHONY: all

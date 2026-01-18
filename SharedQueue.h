@@ -2,6 +2,7 @@
 #define SHARED_QUEUE_H_
 
 #include <string>
+using namespace std::string_literals;
 #include <sys/mman.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -13,58 +14,13 @@
 
 static const size_t QUEUE_SIZE = 4096 * 8;
 
-template<typename T>
-struct SpinQueue {
-    struct {
-        alignas(64) int64_t readIdx;
-        alignas(64) int64_t localReadCount;
-        alignas(64) std::atomic_int64_t count;
-        alignas(64) int64_t writeIdx;
-    } control;
-
-    static const int capacity = (QUEUE_SIZE - sizeof(control)) / sizeof(T);
-
-    std::array<T, capacity> buffer;
-
-    void init() {
-        control.readIdx = 0;
-        control.localReadCount = 0;
-        control.writeIdx = 0;
-        control.count.store(0);
-        for(auto& data : buffer) data = 0;
-    }
-
-    void push(T val) {
-        while(control.count.load(std::memory_order_acquire) == capacity) {}
-
-        buffer[control.writeIdx] = std::move(val);
-        control.writeIdx = (control.writeIdx + 1) % capacity;
-        control.count.fetch_add(1, std::memory_order_release);
-    }
-
-    T pop() {
-        // caching the count on the reader thread doesn't improve throughput in the current benchmark
-        // while (control.localReadCount == 0) {
-        //     control.localReadCount = control.count.load(std::memory_order_acquire);
-        // } 
-        while (control.count.load(std::memory_order_acquire) == 0) {}
-        T retVal = std::move(buffer[control.readIdx]);
-        control.readIdx = (control.readIdx + 1) % capacity;
-        // control.localReadCount--;
-        control.count.fetch_sub(1, std::memory_order_release);
-
-        return retVal;
-    }
-};
-
-// Alternate Implementation, very similar/slighty slower performance
 // template<typename T>
 // struct SpinQueue {
 //     struct {
-//         alignas(64) std::atomic_uint64_t readIdx;
-//         alignas(64) std::atomic_uint64_t writeIdx;
-//         alignas(64) uint64_t localReadIdx;
-//         alignas(64) uint64_t localWriteIdx;
+//         alignas(64) int64_t readIdx;
+//         alignas(64) int64_t localReadCount;
+//         alignas(64) std::atomic_int64_t count;
+//         alignas(64) int64_t writeIdx;
 //     } control;
 
 //     static const int capacity = (QUEUE_SIZE - sizeof(control)) / sizeof(T);
@@ -72,34 +28,79 @@ struct SpinQueue {
 //     std::array<T, capacity> buffer;
 
 //     void init() {
-//         control.readIdx.store(0);
-//         control.writeIdx.store(0);
-//         control.localReadIdx = 0;
-//         control.localWriteIdx = 0;
-//         for(auto& data : buffer) data = 0;
+//         control.readIdx = 0;
+//         control.localReadCount = 0;
+//         control.writeIdx = 0;
+//         control.count.store(0);
+//         std::fill(buffer.begin(), buffer.end(), 0);
 //     }
 
 //     void push(T val) {
-//         uint64_t localWrite = control.writeIdx.load(std::memory_order_acquire);
-//         while((localWrite - control.localReadIdx) == capacity) {
-//             control.localReadIdx = control.readIdx.load(std::memory_order_acquire);
-//         }
+//         while(control.count.load(std::memory_order_acquire) == capacity) {}
 
-//         buffer[localWrite % capacity] = std::move(val);
-//         control.writeIdx.fetch_add(1, std::memory_order_release);
+//         buffer[control.writeIdx] = std::move(val);
+//         control.writeIdx = (control.writeIdx + 1) % capacity;
+//         control.count.fetch_add(1, std::memory_order_release);
 //     }
 
 //     T pop() {
-//         uint64_t localRead = control.readIdx.load(std::memory_order_acquire);
-//         while (localRead == control.localWriteIdx) {
-//             control.localWriteIdx = control.writeIdx.load(std::memory_order_acquire);
-//         }
-//         T retVal = std::move(buffer[localRead % capacity]);
-//         control.readIdx.fetch_add(1, std::memory_order_release);
+//         // caching the count on the reader thread doesn't improve throughput in the current benchmark
+//         // while (control.localReadCount == 0) {
+//         //     control.localReadCount = control.count.load(std::memory_order_acquire);
+//         // } 
+//         while (control.count.load(std::memory_order_acquire) == 0) {}
+//         T retVal = std::move(buffer[control.readIdx]);
+//         control.readIdx = (control.readIdx + 1) % capacity;
+//         // control.localReadCount--;
+//         control.count.fetch_sub(1, std::memory_order_release);
 
 //         return retVal;
 //     }
 // };
+
+// Alternate Implementation, very similar/slighty slower performance
+template<typename T>
+struct SpinQueue {
+    struct {
+        alignas(64) std::atomic_uint64_t readIdx;
+        alignas(64) std::atomic_uint64_t writeIdx;
+        alignas(64) uint64_t localReadIdx;
+        alignas(64) uint64_t localWriteIdx;
+    } control;
+
+    static const int capacity = (QUEUE_SIZE - sizeof(control)) / sizeof(T);
+
+    std::array<T, capacity> buffer;
+
+    void init() {
+        control.readIdx.store(0);
+        control.writeIdx.store(0);
+        control.localReadIdx = 0;
+        control.localWriteIdx = 0;
+        for(auto& data : buffer) data = 0;
+    }
+
+    void push(T val) {
+        uint64_t localWrite = control.writeIdx.load(std::memory_order_acquire);
+        while((localWrite - control.localReadIdx) == capacity) {
+            control.localReadIdx = control.readIdx.load(std::memory_order_acquire);
+        }
+
+        buffer[localWrite % capacity] = std::move(val);
+        control.writeIdx.fetch_add(1, std::memory_order_release);
+    }
+
+    T pop() {
+        uint64_t localRead = control.readIdx.load(std::memory_order_acquire);
+        while (localRead == control.localWriteIdx) {
+            control.localWriteIdx = control.writeIdx.load(std::memory_order_acquire);
+        }
+        T retVal = std::move(buffer[localRead % capacity]);
+        control.readIdx.fetch_add(1, std::memory_order_release);
+
+        return retVal;
+    }
+};
 
 static_assert(sizeof(SpinQueue<char>) == QUEUE_SIZE,
             "SpinQueue must be exactly QUEUE_SIZE bytes");
@@ -139,9 +140,7 @@ struct BlockingQueue {
         control.readIdx = -1;
         control.insertIdx = 0;
 
-        for(auto& data : buffer) {
-            data = 0;
-        }
+        std::fill(buffer.begin(), buffer.end(), 0);
     }
 
     bool isFull() {
@@ -208,7 +207,7 @@ protected:
     std::string queueName;
     BackingQueue<T>* data; // ptr to shared memory
 
-    SharedQueue(std::string name) : queueName("/dev/shm/" + name), data(nullptr) {
+    explicit SharedQueue(const std::string& name) : queueName("/dev/shm/"s + name), data(nullptr) {
         LogInfo("Setting up shared memory");
 
 
@@ -244,7 +243,7 @@ template<typename T>
 class BlockingQueueWriter : SharedQueue<T, BlockingQueue> {
     
     public:
-    BlockingQueueWriter(std::string name) : SharedQueue<T, BlockingQueue>(name) {}
+    explicit BlockingQueueWriter(const std::string& name) : SharedQueue<T, BlockingQueue>(name) {}
 
     void push(T val) {
         this->data->push(val);
@@ -255,7 +254,7 @@ template<typename T>
 class BlockingQueueReader : SharedQueue<T, BlockingQueue> {
 
     public:
-    BlockingQueueReader(std::string name) : SharedQueue<T, BlockingQueue>(name) {}
+    explicit BlockingQueueReader(const std::string& name) : SharedQueue<T, BlockingQueue>(name) {}
 
     T pop() {
         return this->data->pop();
@@ -266,7 +265,7 @@ template<typename T>
 class SpinQueueWriter : SharedQueue<T, SpinQueue> {
     
     public:
-    SpinQueueWriter(std::string name) : SharedQueue<T, SpinQueue>(name) {}
+    explicit SpinQueueWriter(const std::string& name) : SharedQueue<T, SpinQueue>(name) {}
 
     void push(T val) {
         this->data->push(val);
@@ -277,7 +276,7 @@ template<typename T>
 class SpinQueueReader : SharedQueue<T, SpinQueue> {
 
     public:
-    SpinQueueReader(std::string name) : SharedQueue<T, SpinQueue>(name) {}
+    explicit SpinQueueReader(const std::string& name) : SharedQueue<T, SpinQueue>(name) {}
 
     T pop() {
         return this->data->pop();
